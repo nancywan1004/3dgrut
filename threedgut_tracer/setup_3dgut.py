@@ -81,6 +81,8 @@ def setup_3dgut(conf):
         "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
         "-U__CUDA_NO_HALF2_OPERATORS__",
         "-use_fast_math", "-O3",
+        "-allow-unsupported-compiler",
+        "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
         *defines,
     ]
 
