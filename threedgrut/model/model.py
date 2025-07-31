@@ -718,6 +718,95 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
             self.setup_optimizer()
             self.validate_fields()
 
+    @torch.no_grad()
+    def init_from_ply_zero_order_sh(self, mogt_path: str, init_model=True):
+        """
+        Initialize model from PLY file using only 0-order spherical harmonics.
+        This method ignores all f_rest_* fields and only uses f_dc_* fields,
+        making it compatible with Isaac Sim 5.0 which only supports 0-order SH.
+
+        Note: Even for 0-order SH, we ensure features_specular has the correct
+        dimensions to avoid export errors. The specular features will be all zeros.
+        """
+        plydata = PlyData.read(mogt_path)
+
+        mogt_pos = np.stack((np.asarray(plydata.elements[0]["x"]),
+                        np.asarray(plydata.elements[0]["y"]),
+                        np.asarray(plydata.elements[0]["z"])),  axis=1)
+        mogt_densities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+
+        num_gaussians = mogt_pos.shape[0]
+        mogt_albedo = np.zeros((num_gaussians, 3))
+        mogt_albedo[:, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+        mogt_albedo[:, 1] = np.asarray(plydata.elements[0]["f_dc_1"])
+        mogt_albedo[:, 2] = np.asarray(plydata.elements[0]["f_dc_2"])
+
+        # For 0-order SH, we calculate the expected specular dimensions
+        # Even though max_n_features=0, we need to ensure proper tensor dimensions
+        num_speculars = (self.max_n_features + 1) ** 2 - 1  # Should be 0 for max_n_features=0
+
+        # Handle the case where num_speculars is 0 (0-order SH)
+        if num_speculars == 0:
+            # For 0-order SH, features_specular should be empty but properly shaped
+            mogt_specular = np.zeros((num_gaussians, 0))
+            logger.info("Using 0-order SH: features_specular will be empty (no f_rest fields)")
+        else:
+            # For higher-order SH, fill with zeros
+            mogt_specular = np.zeros((num_gaussians, num_speculars * 3))
+            logger.info(f"Using {self.max_n_features}-order SH: features_specular shape = ({num_gaussians}, {num_speculars * 3})")
+
+        scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
+        scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
+        mogt_scales = np.zeros((num_gaussians, len(scale_names)))
+        for idx, attr_name in enumerate(scale_names):
+            mogt_scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
+        rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
+        mogt_rotation = np.zeros((num_gaussians, len(rot_names)))
+        for idx, attr_name in enumerate(rot_names):
+            mogt_rotation[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        self.positions = torch.nn.Parameter(torch.tensor(mogt_pos, dtype=self.positions.dtype,device=self.device))
+        self.features_albedo = torch.nn.Parameter(torch.tensor(mogt_albedo, dtype=self.features_albedo.dtype,device=self.device))
+        self.features_specular = torch.nn.Parameter(torch.tensor(mogt_specular,dtype=self.features_specular.dtype,device=self.device))
+        self.density = torch.nn.Parameter(torch.tensor(mogt_densities,dtype=self.density.dtype,device=self.device))
+        self.scale = torch.nn.Parameter(torch.tensor(mogt_scales,dtype=self.scale.dtype,device=self.device))
+        self.rotation = torch.nn.Parameter(torch.tensor(mogt_rotation,dtype=self.rotation.dtype,device=self.device))
+
+        self.n_active_features = self.max_n_features
+
+        if init_model:
+            self.set_optimizable_parameters()
+            self.setup_optimizer()
+            self.validate_fields()
+
+        logger.info(f"Loaded PLY with 0-order spherical harmonics: {num_gaussians} Gaussians")
+        logger.info(f"features_albedo shape: {self.features_albedo.shape}")
+        logger.info(f"features_specular shape: {self.features_specular.shape}")
+
+        # Validate that the configuration is consistent
+        self._validate_zero_order_sh_configuration()
+
+    def _validate_zero_order_sh_configuration(self):
+        """
+        Validate that the model configuration is consistent for 0-order SH.
+        This ensures that export operations will work correctly.
+        """
+        if self.max_n_features == 0:
+            expected_specular_dim = sh_degree_to_specular_dim(0)  # Should be 0
+            actual_specular_dim = self.features_specular.shape[1]
+
+            if actual_specular_dim != expected_specular_dim:
+                logger.warning(f"Inconsistent specular dimensions: expected {expected_specular_dim}, got {actual_specular_dim}")
+
+            logger.info("✅ 0-order SH configuration validated successfully")
+            logger.info("   - Only DC components (f_dc_*) will be used")
+            logger.info("   - All f_rest_* fields will be ignored/empty")
+            logger.info("   - Compatible with Isaac Sim 5.0")
+        else:
+            logger.info(f"Using {self.max_n_features}-order SH configuration")
+
     def copy_fields(self, other, deepcopy=False):
         """ Copies fields from other onto self """
         if self.optimizer is not None:

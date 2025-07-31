@@ -55,6 +55,8 @@ def main():
     parser.add_argument("input_file", type=str, help="Input PLY file path")
     parser.add_argument("--output_file", type=str,
                         help="Output USDZ file path (defaults to input file path with .usdz extension)")
+    parser.add_argument("--force_zero_order_sh", action="store_true", default=True,
+                        help="Force conversion to 0-order spherical harmonics for Isaac Sim 5.0 compatibility (default: True)")
 
     args = parser.parse_args()
 
@@ -77,16 +79,31 @@ def main():
         output_path = input_path.with_suffix(".usdz")
 
     logger.info(f"Converting {input_path} to {output_path}")
+    if args.force_zero_order_sh:
+        logger.info("Forcing 0-order spherical harmonics for Isaac Sim 5.0 compatibility")
 
     try:
         # 1. Create model with default config
         logger.info("Loading default configuration")
         conf = load_default_config()
+
+        # Override spherical harmonics degree to 0 for Isaac Sim compatibility
+        if args.force_zero_order_sh:
+            conf.model.progressive_training.max_n_features = 0
+            conf.model.progressive_training.init_n_features = 0
+            # Also update the render configuration to match
+            conf.render.particle_radiance_sph_degree = 0
+            logger.info("Set max_n_features and init_n_features to 0 for 0-order SH")
+            logger.info("Set particle_radiance_sph_degree to 0 for consistent rendering")
+
         model = MixtureOfGaussians(conf)
 
-        # 2. Use init_from_ply
+        # 2. Use init_from_ply with modified loading for 0-order SH
         logger.info(f"Loading PLY with init_from_ply: {input_path}")
-        model.init_from_ply(str(input_path), init_model=False)
+        if args.force_zero_order_sh:
+            model.init_from_ply_zero_order_sh(str(input_path), init_model=False)
+        else:
+            model.init_from_ply(str(input_path), init_model=False)
 
         # 3. Create USDZExporter
         exporter = USDZExporter()
